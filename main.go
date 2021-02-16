@@ -52,6 +52,7 @@ var (
 	license   = flag.String("l", "apache", "license type: apache, bsd, mit, mpl")
 	licensef  = flag.String("f", "", "license file")
 	year      = flag.String("y", fmt.Sprint(time.Now().Year()), "copyright year(s)")
+	update    = flag.Bool("u", false, "update mode: if the year in the license was older than current one - update it (2018 changes to 2018-2021)")
 	verbose   = flag.Bool("v", false, "verbose mode: print the name of the files that are modified")
 	checkonly = flag.Bool("check", false, "check only mode: verify presence of license headers and exit with non-zero code if missing")
 )
@@ -120,8 +121,21 @@ func main() {
 						fmt.Printf("%s\n", f.path)
 						return errors.New("missing license header")
 					}
+
+					if *update {
+						// Check if file has an outdated license
+						hasOutdatedLicense, err := fileHasOutdatedLicense(f.path, *year)
+						if err != nil {
+							log.Printf("%s: %v", f.path, err)
+							return err
+						}
+						if hasOutdatedLicense {
+							fmt.Printf("%s - update license\n", f.path)
+							return errors.New("outdated license header")
+						}
+					}
 				} else {
-					modified, err := addLicense(f.path, f.mode, t, data)
+					modified, err := addLicense(f.path, *update, f.mode, t, data)
 					if err != nil {
 						log.Printf("%s: %v", f.path, err)
 						return err
@@ -166,10 +180,11 @@ func walk(ch chan<- *file, start string) {
 	})
 }
 
-// addLicense add a license to the file if missing.
+// addLicense add a license to the file if missing
+// or update if year is older than current year (if updateOldLicense = true).
 //
 // It returns true if the file was updated.
-func addLicense(path string, fmode os.FileMode, tmpl *template.Template, data *copyrightData) (bool, error) {
+func addLicense(path string, updateOldLicense bool, fmode os.FileMode, tmpl *template.Template, data *copyrightData) (bool, error) {
 	var lic []byte
 	var err error
 	lic, err = licenseHeader(path, tmpl, data)
@@ -181,8 +196,18 @@ func addLicense(path string, fmode os.FileMode, tmpl *template.Template, data *c
 	if err != nil {
 		return false, err
 	}
-	if hasLicense(b) || isGenerated(b) {
-		return false, err
+	if hasLicense(b) {
+		if isGenerated(b) || !updateOldLicense {
+			return false, nil
+		}
+		if isOutdated(b, data.Year) {
+			b, err := updateExistingLicense(b, data.Year)
+			if err != nil {
+				return false, err
+			}
+			return true, ioutil.WriteFile(path, b, fmode)
+		}
+		return false, nil
 	}
 
 	line := hashBang(b)
@@ -205,6 +230,15 @@ func fileHasLicense(path string) (bool, error) {
 	}
 	// If generated, we count it as if it has a license.
 	return hasLicense(b) || isGenerated(b), nil
+}
+
+// fileHasOutdatedLicense reports whether the file at path contains a license header with year older than the current one.
+func fileHasOutdatedLicense(path string, currentYear string) (bool, error) {
+	b, err := ioutil.ReadFile(path)
+	if err != nil {
+		return false, err
+	}
+	return hasLicense(b) && isOutdated(b, currentYear), nil
 }
 
 func licenseHeader(path string, tmpl *template.Template, data *copyrightData) ([]byte, error) {
@@ -272,6 +306,7 @@ func hashBang(b []byte) []byte {
 
 // go generate: ^// Code generated .* DO NOT EDIT\.$
 var goGenerated = regexp.MustCompile(`(?m)^.{1,2} Code generated .* DO NOT EDIT\.$`)
+
 // cargo raze: ^DO NOT EDIT! Replaced on runs of cargo-raze$
 var cargoRazeGenerated = regexp.MustCompile(`(?m)^DO NOT EDIT! Replaced on runs of cargo-raze$`)
 
@@ -288,4 +323,66 @@ func hasLicense(b []byte) bool {
 	}
 	return bytes.Contains(bytes.ToLower(b[:n]), []byte("copyright")) ||
 		bytes.Contains(bytes.ToLower(b[:n]), []byte("mozilla public"))
+}
+
+// reLicense contains regexp to parse years in actual header
+// 2020
+// 2018-2020
+var reLicense = regexp.MustCompile(`(([\d]{4})-)?([\d]{4})`)
+
+// Year contains information about parsed header
+type Year struct {
+	creation         string
+	lastModification string
+	currentString    string
+}
+
+// parseLicenseYear returns Year representation of actual license header
+func parseLicenseYear(b []byte) (bool, *Year) {
+	n := 1000
+	if len(b) < 1000 {
+		n = len(b)
+	}
+	years := reLicense.FindAllSubmatch(b[:n], 2)
+	if len(years) > 0 {
+		yearMatch := years[0]
+		y := &Year{
+			currentString:    string(yearMatch[0]),
+			lastModification: string(yearMatch[3]),
+		}
+		if !bytes.Equal(yearMatch[2], []byte("")) {
+			y.creation = string(yearMatch[2])
+		} else {
+			y.creation = y.lastModification
+		}
+		return true, y
+	}
+
+	return false, nil
+}
+
+// isOutdated return true if the year in license header is older than the current one
+func isOutdated(b []byte, currentYear string) bool {
+	found, years := parseLicenseYear(b)
+	if found {
+		return years.lastModification != currentYear
+	}
+	return false
+}
+
+// updateExistingLicense update license with currentYear
+func updateExistingLicense(b []byte, currentYear string) ([]byte, error) {
+	found, years := parseLicenseYear(b)
+	if !found {
+		return []byte{}, errors.New("cannot parse license header")
+	}
+
+	i := bytes.Index(b, []byte(years.currentString))
+	if years.creation == currentYear || years.lastModification == currentYear {
+		// update is not required
+		return b, nil
+	}
+	newYearString := fmt.Sprintf("%s-%s", years.creation, currentYear)
+
+	return bytes.Join([][]byte{b[0:i], []byte(newYearString), b[i+len(years.currentString):]}, []byte("")), nil
 }
