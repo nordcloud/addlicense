@@ -196,11 +196,11 @@ func addLicense(path string, updateOldLicense bool, fmode os.FileMode, tmpl *tem
 	if err != nil {
 		return false, err
 	}
+	if isGenerated(b) {
+		return false, nil
+	}
 	if hasLicense(b) {
-		if isGenerated(b) || !updateOldLicense {
-			return false, nil
-		}
-		if isOutdated(b, data.Year) {
+		if updateOldLicense && isOutdated(b, data.Year) {
 			b, err := updateExistingLicense(b, data.Year)
 			if err != nil {
 				return false, err
