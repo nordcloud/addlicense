@@ -123,7 +123,6 @@ func main() {
 					}
 
 					if *update {
-						// Check if file has an outdated license
 						hasOutdatedLicense, err := fileHasOutdatedLicense(f.path, *year)
 						if err != nil {
 							log.Printf("%s: %v", f.path, err)
@@ -200,7 +199,7 @@ func addLicense(path string, updateOldLicense bool, fmode os.FileMode, tmpl *tem
 		return false, nil
 	}
 	if hasLicense(b) {
-		if updateOldLicense && isOutdated(b, data.Year) {
+		if updateOldLicense && isOutdatedLicense(b, data.Year) {
 			b, err := updateExistingLicense(b, data.Year)
 			if err != nil {
 				return false, err
@@ -238,7 +237,7 @@ func fileHasOutdatedLicense(path string, currentYear string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return hasLicense(b) && isOutdated(b, currentYear), nil
+	return hasLicense(b) && isOutdatedLicense(b, currentYear), nil
 }
 
 func licenseHeader(path string, tmpl *template.Template, data *copyrightData) ([]byte, error) {
@@ -330,15 +329,15 @@ func hasLicense(b []byte) bool {
 // 2018-2020
 var reLicense = regexp.MustCompile(`(([\d]{4})-)?([\d]{4})`)
 
-// Year contains information about parsed header
-type Year struct {
+// licenseYear contains information about parsed header
+type licenseYear struct {
 	creation         string
 	lastModification string
 	currentString    string
 }
 
-// parseLicenseYear returns Year representation of actual license header
-func parseLicenseYear(b []byte) (bool, *Year) {
+// parseLicenseYear returns licenseYear representation of actual license header or nil if not found
+func parseLicenseYear(b []byte) *licenseYear {
 	n := 1000
 	if len(b) < 1000 {
 		n = len(b)
@@ -346,7 +345,7 @@ func parseLicenseYear(b []byte) (bool, *Year) {
 	years := reLicense.FindAllSubmatch(b[:n], 2)
 	if len(years) > 0 {
 		yearMatch := years[0]
-		y := &Year{
+		y := &licenseYear{
 			currentString:    string(yearMatch[0]),
 			lastModification: string(yearMatch[3]),
 		}
@@ -355,16 +354,16 @@ func parseLicenseYear(b []byte) (bool, *Year) {
 		} else {
 			y.creation = y.lastModification
 		}
-		return true, y
+		return y
 	}
 
-	return false, nil
+	return nil
 }
 
-// isOutdated return true if the year in license header is older than the current one
-func isOutdated(b []byte, currentYear string) bool {
-	found, years := parseLicenseYear(b)
-	if found {
+// isOutdatedLicense return true if the year in license header is older than the current one
+func isOutdatedLicense(b []byte, currentYear string) bool {
+	years := parseLicenseYear(b)
+	if years != nil {
 		return years.lastModification != currentYear
 	}
 	return false
@@ -372,16 +371,17 @@ func isOutdated(b []byte, currentYear string) bool {
 
 // updateExistingLicense update license with currentYear
 func updateExistingLicense(b []byte, currentYear string) ([]byte, error) {
-	found, years := parseLicenseYear(b)
-	if !found {
+	years := parseLicenseYear(b)
+	if years == nil {
 		return []byte{}, errors.New("cannot parse license header")
 	}
 
-	i := bytes.Index(b, []byte(years.currentString))
 	if years.creation == currentYear || years.lastModification == currentYear {
 		// update is not required
 		return b, nil
 	}
+
+	i := bytes.Index(b, []byte(years.currentString))
 	newYearString := fmt.Sprintf("%s-%s", years.creation, currentYear)
 
 	return bytes.Join([][]byte{b[0:i], []byte(newYearString), b[i+len(years.currentString):]}, []byte("")), nil
